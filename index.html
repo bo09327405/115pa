@@ -358,18 +358,21 @@ button, input, textarea { font: inherit; color: inherit; }
 .toast.is-on { transform: translate(-50%, 0); }
 .toast.is-err { background: var(--alert); }
 
-/* ── 每日用量固定視窗 ── */
+/* ── 用量固定視窗（今日＋累計兩條） ── */
 .usage-widget {
   position: fixed; left: var(--s4); bottom: var(--s4); z-index: 25;
-  width: 200px; background: var(--paper); border: 1.5px solid var(--ink);
+  width: 220px; background: var(--paper); border: 1.5px solid var(--ink);
   padding: var(--s3) var(--s4); box-shadow: 2px 2px 0 rgba(24,32,46,.15);
 }
 .usage-head { font-weight: 700; font-size: 13px; margin-bottom: 6px; }
-.usage-bar { height: 8px; background: #fff; border: 1px solid var(--rule); margin-bottom: 4px; }
+.usage-row { display: grid; grid-template-columns: 34px 1fr 32px; align-items: center; gap: 6px; margin-bottom: 4px; }
+.usage-row-label { font-size: 11px; color: var(--pencil); font-weight: 700; }
+.usage-row-note { grid-column: 2 / span 2; font-size: 11px; color: var(--tape-g); font-weight: 700; }
+.usage-bar { height: 7px; background: #fff; border: 1px solid var(--rule); }
 .usage-fill { height: 100%; background: var(--tape-g); transition: width .25s ease; }
-.usage-widget.is-near .usage-fill { background: var(--tape-y); }
-.usage-widget.is-full .usage-fill { background: var(--alert); }
-.usage-nums { font-size: 12px; color: var(--pencil); font-variant-numeric: tabular-nums; }
+.usage-row.is-near .usage-fill { background: var(--tape-y); }
+.usage-row.is-full .usage-fill { background: var(--alert); }
+.usage-row-pct { font-size: 11px; color: var(--pencil); font-variant-numeric: tabular-nums; text-align: right; }
 .usage-full-msg { margin-top: 4px; font-size: 12px; color: var(--alert); font-weight: 700; }
 
 /* ── 教練即時對話 ── */
@@ -735,6 +738,7 @@ button, input, textarea { font: inherit; color: inherit; }
     saveAuth_();
     S.user = { signedIn: true, email: payload.email };
     renderAccount();
+    renderCoachPicker();
     syncCloudAfterAuth_();
   };
   function signOut_() {
@@ -743,6 +747,7 @@ button, input, textarea { font: inherit; color: inherit; }
     try { if (window.google && google.accounts) google.accounts.id.disableAutoSelect(); } catch (e) {}
     S.user = { signedIn: false, email: '' };
     renderAccount();
+    renderCoachPicker();
     setSaveStatus('已登出。未登入：進度只暫存在這台裝置 7 天');
   }
   async function syncCloudAfterAuth_() {
@@ -822,10 +827,19 @@ button, input, textarea { font: inherit; color: inherit; }
         if (r && r._usage) { S.usage = r._usage; renderUsage(); }
         return r;
       } catch (err) {
-        const budget = /^BUDGET:(.+)/.exec(err.message || '');
-        if (budget) {
-          try { S.usage = JSON.parse(budget[1]); renderUsage(); } catch (e) {}
-          throw new Error('今天使用教練 ' + S.coach + ' 的練習額度已經用完，明天會重置。可以先試試其他教練，或等明天再回來。');
+        if (/^LOGIN_REQUIRED:/.test(err.message || '')) {
+          const name = (S.coaches.find(c => c.id === S.coach) || {}).name || '這位教練';
+          throw new Error(name + '需要先登入學校帳號才能使用。可以先按右上角登入，或切換成其他教練（不用登入也能用）。');
+        }
+        const budgetLifetime = /^BUDGET_LIFETIME:(.+)/.exec(err.message || '');
+        if (budgetLifetime) {
+          try { S.usage = JSON.parse(budgetLifetime[1]); renderUsage(); } catch (e) {}
+          throw new Error('教練 ' + S.coach + ' 的累計額度已經用完，這個額度不會重置。可以先試試其他教練。');
+        }
+        const budgetDaily = /^BUDGET_DAILY:(.+)/.exec(err.message || '');
+        if (budgetDaily) {
+          try { S.usage = JSON.parse(budgetDaily[1]); renderUsage(); } catch (e) {}
+          throw new Error('教練 ' + S.coach + ' 今天的額度已經用完，明天會解鎖。可以先試試其他教練。');
         }
         const m = /^BUSY:(\d+)/.exec(err.message || '');
         if (m) {
@@ -946,7 +960,10 @@ button, input, textarea { font: inherit; color: inherit; }
     el.innerHTML =
       '<span class="coach-label">你的教練</span>' +
       '<select id="coach-select" aria-label="選擇教練">' +
-      S.coaches.map(c => '<option value="' + esc(c.id) + '"' + (c.id === S.coach ? ' selected' : '') + '>' + esc(c.name) + '</option>').join('') +
+      S.coaches.map((c, i) => {
+        const needsLogin = i === 0 && !S.user.signedIn;   // 第一位（教練 A）是付費金鑰，沒登入時標註提醒
+        return '<option value="' + esc(c.id) + '"' + (c.id === S.coach ? ' selected' : '') + '>' + esc(c.name) + (needsLogin ? '（需登入）' : '') + '</option>';
+      }).join('') +
       '</select>' +
       '<span class="coach-tagline" id="coach-tagline"></span>';
     updateCoachTagline();
@@ -977,21 +994,33 @@ button, input, textarea { font: inherit; color: inherit; }
   }
 
   /* ── 每日用量固定視窗（只有教練 A／付費金鑰才會顯示；其他教練免費、不限流量） ── */
+  function usageRow_(label, u, unlimitedNote) {
+    if (u.capUSD == null) return '<div class="usage-row"><span class="usage-row-label">' + label + '</span><span class="usage-row-note">' + unlimitedNote + '</span></div>';
+    const pct = Math.round((u.pct || 0) * 100);
+    const cls = pct >= 100 ? ' is-full' : pct >= 80 ? ' is-near' : '';
+    return '<div class="usage-row' + cls + '">' +
+      '<span class="usage-row-label">' + label + '</span>' +
+      '<div class="usage-bar"><div class="usage-fill" style="width:' + Math.min(100, pct) + '%"></div></div>' +
+      '<span class="usage-row-pct">' + pct + '%</span>' +
+      '</div>';
+  }
+
   function renderUsage() {
     const box = $('#usage-widget');
     if (!box) return;
     // 只有「目前選的是第一位教練」且伺服器回過用量資料，才顯示這個視窗
     const isCoachA = S.coaches.length && S.coach === S.coaches[0].id;
-    if (!isCoachA || !S.usage) { box.hidden = true; return; }
+    if (!isCoachA || !S.usage || !S.usage.daily || !S.usage.lifetime) { box.hidden = true; return; }
     box.hidden = false;
-    const pct = Math.round((S.usage.pct || 0) * 100);
-    const remain = Math.max(0, 100 - pct);
-    box.className = 'usage-widget' + (pct >= 100 ? ' is-full' : pct >= 80 ? ' is-near' : '');
+    const { daily, lifetime } = S.usage;
+    const anyFull = lifetime.pct >= 1 || (daily.capUSD != null && daily.pct >= 1);
+    box.className = 'usage-widget' + (anyFull ? ' is-full' : '');
     box.innerHTML =
-      '<div class="usage-head">今日練習額度</div>' +
-      '<div class="usage-bar"><div class="usage-fill" style="width:' + Math.min(100, pct) + '%"></div></div>' +
-      '<div class="usage-nums">已用 ' + pct + '%　剩餘 ' + remain + '%</div>' +
-      (pct >= 100 ? '<div class="usage-full-msg">今天用完了，明天會重置</div>' : '');
+      '<div class="usage-head">教練 A 額度</div>' +
+      usageRow_('今日', daily, '不限') +
+      usageRow_('累計', lifetime, '') +
+      (lifetime.pct >= 1 ? '<div class="usage-full-msg">累計額度已經用完，不會重置</div>' :
+       (daily.capUSD != null && daily.pct >= 1) ? '<div class="usage-full-msg">今天的額度用完了，明天解鎖</div>' : '');
   }
 
   /* ── 帳號狀態列 ── */
