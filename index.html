@@ -157,6 +157,8 @@ button, input, textarea { font: inherit; color: inherit; }
 .input:focus { border-color: var(--ink); outline: none; box-shadow: 0 0 0 3px rgba(43,107,211,.25); }
 .input-q { font-size: 20px; font-weight: 700; line-height: 1.55; }
 .hint { margin: 0; font-size: 14px; color: var(--pencil); }
+#grade-attempts-note { margin-bottom: var(--s3); }
+#grade-attempts-note.is-bad { color: var(--alert); font-weight: 700; }
 .muted { color: var(--pencil); margin: 0; }
 
 .btn {
@@ -656,6 +658,7 @@ button, input, textarea { font: inherit; color: inherit; }
         <h2 id="s4-title" class="scene-title">照評分量表試評一次</h2>
         <p class="scene-lede">系統會用老師的四項指標評你目前的草稿，標出落在哪一級、為什麼，以及下一步該改哪裡。這是模擬，實際分數以老師評分為準。</p>
       </div>
+      <p id="grade-attempts-note" class="hint" aria-live="polite"></p>
       <button id="btn-grade" class="btn btn-primary" type="button">開始模擬評分</button>
       <div id="grade-results" aria-live="polite"></div>
     </section>
@@ -697,17 +700,12 @@ button, input, textarea { font: inherit; color: inherit; }
 (function () {
   'use strict';
 
-  /* ============================================================
-   *  設定：部署好 Apps Script 網頁應用程式、申請好 OAuth Client ID 後，
-   *  把下面兩個值換成你自己的，這個檔案才能運作。
-   * ============================================================ */
   const CONFIG = {
     APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbwUZwUwEvaYWiZuJr4X2UKA9OeW0ncGvXEkFZa1Zb_RFbOgp2iBUqfV1D63rc6c7MZUjg/exec',
     GOOGLE_CLIENT_ID: '459536923115-0shnjk9m762klapudh6fhk1ph6pks8db.apps.googleusercontent.com',
     ALLOWED_HD: 'mail2.chshs.ntpc.edu.tw'
   };
 
-  /* ── 登入狀態：存放 Google Identity Services 給的 idToken ── */
   const AUTH = { idToken: '', email: '', exp: 0 };
   const AUTH_STORE = 'pa-final-studio-auth-v1';
 
@@ -717,14 +715,9 @@ button, input, textarea { font: inherit; color: inherit; }
       return JSON.parse(decodeURIComponent(escape(atob(b64))));
     } catch (e) { return null; }
   }
-
   function saveAuth_() {
-    try {
-      if (AUTH.idToken) sessionStorage.setItem(AUTH_STORE, JSON.stringify(AUTH));
-      else sessionStorage.removeItem(AUTH_STORE);
-    } catch (e) {}
+    try { if (AUTH.idToken) sessionStorage.setItem(AUTH_STORE, JSON.stringify(AUTH)); else sessionStorage.removeItem(AUTH_STORE); } catch (e) {}
   }
-
   function restoreAuth_() {
     try {
       const raw = sessionStorage.getItem(AUTH_STORE);
@@ -735,19 +728,15 @@ button, input, textarea { font: inherit; color: inherit; }
       return true;
     } catch (e) { return false; }
   }
-
   window.handleGoogleSignIn = function (response) {
     const payload = decodeJwt_(response.credential);
     if (!payload || !payload.email) { toast('登入失敗，請再試一次。', true); return; }
-    AUTH.idToken = response.credential;
-    AUTH.email = payload.email;
-    AUTH.exp = payload.exp;
+    AUTH.idToken = response.credential; AUTH.email = payload.email; AUTH.exp = payload.exp;
     saveAuth_();
     S.user = { signedIn: true, email: payload.email };
     renderAccount();
     syncCloudAfterAuth_();
   };
-
   function signOut_() {
     AUTH.idToken = ''; AUTH.email = ''; AUTH.exp = 0;
     saveAuth_();
@@ -756,7 +745,6 @@ button, input, textarea { font: inherit; color: inherit; }
     renderAccount();
     setSaveStatus('已登出。未登入：進度只暫存在這台裝置 7 天');
   }
-
   async function syncCloudAfterAuth_() {
     const local = readLocal();
     const localMine = local && (local.owner || '') === AUTH.email ? local : null;
@@ -785,7 +773,7 @@ button, input, textarea { font: inherit; color: inherit; }
     notes: {}, done: {},
     topicChapters: [], questionChapters: [], lastGrade: null,
     user: { signedIn: false, email: '' }, appUrl: '', savedAt: 0,
-    coaches: [], coach: '', usage: null, chat: { messages: [], pendingAttachment: null }
+    coaches: [], coach: '', usage: null, chat: { messages: [], pendingAttachment: null }, gradeAttempts: null
   };
   const STORE = 'pa-final-studio-v2';
   const LOCAL_TTL = 7 * 86400000;   // 未登入時的暫存期限：7 天
@@ -971,6 +959,23 @@ button, input, textarea { font: inherit; color: inherit; }
     el.textContent = c ? c.tagline : '';
   }
 
+  /* ── 模擬評分剩餘次數 ── */
+  function renderGradeAttempts() {
+    const el = $('#grade-attempts-note');
+    const btn = $('#btn-grade');
+    if (!el || !S.gradeAttempts) return;
+    const { used, max, remaining } = S.gradeAttempts;
+    if (remaining <= 0) {
+      el.textContent = '模擬評分的 ' + max + ' 次機會已經用完了。';
+      el.classList.add('is-bad');
+      if (btn) btn.disabled = true;
+    } else {
+      el.textContent = '模擬評分還剩 ' + remaining + ' 次（已用 ' + used + ' / ' + max + '），用在你最有把握的版本上。';
+      el.classList.remove('is-bad');
+      if (btn) btn.disabled = false;
+    }
+  }
+
   /* ── 每日用量固定視窗（只有教練 A／付費金鑰才會顯示；其他教練免費、不限流量） ── */
   function renderUsage() {
     const box = $('#usage-widget');
@@ -1005,13 +1010,11 @@ button, input, textarea { font: inherit; color: inherit; }
       renderGisButton_();
     }
   }
-
   function renderGisButton_() {
     const box = $('#gis-button');
     if (!box || !window.google || !google.accounts || !google.accounts.id) return;
     google.accounts.id.renderButton(box, { theme: 'outline', size: 'medium', text: 'signin_with', locale: 'zh_TW' });
   }
-
   function initAuth_() {
     if (!window.google || !google.accounts || !google.accounts.id) { setTimeout(initAuth_, 300); return; }
     const opts = { client_id: CONFIG.GOOGLE_CLIENT_ID, callback: window.handleGoogleSignIn, auto_select: true };
@@ -1323,14 +1326,16 @@ button, input, textarea { font: inherit; color: inherit; }
   /* ── 4 試評分 ── */
   async function onGrade(e) {
     if (!S.draft.question.trim()) { toast('先在「寫下來」填入你的核心問題。', true); return; }
+    if (S.gradeAttempts && S.gradeAttempts.remaining <= 0) { toast('模擬評分的次數已經用完了。', true); return; }
     const done = busy(e.currentTarget, '正在對照評分量表…');
     try {
       const r = await callAI('apiSimulateGrade', { draft: S.draft }, done, '正在對照評分量表…');
       S.lastGrade = r;
+      if (r.gradeAttempts) { S.gradeAttempts = r.gradeAttempts; renderGradeAttempts(); }
       renderGrade(r);
       markDone(4);
     } catch (err) { toast(err.message, true); }
-    finally { done(); }
+    finally { done(); renderGradeAttempts(); }
   }
 
   function renderGrade(r) {
@@ -1592,6 +1597,7 @@ button, input, textarea { font: inherit; color: inherit; }
       S.coaches = st.coaches || [];
       if (!S.coach || !S.coaches.some(c => c.id === S.coach)) S.coach = (S.coaches[0] || {}).id || '';
       if (st.usage) S.usage = st.usage;
+      if (st.gradeAttempts) { S.gradeAttempts = st.gradeAttempts; renderGradeAttempts(); }
       renderChapters();
       renderDeadline();
       renderCoachPicker();
