@@ -704,7 +704,7 @@ button, input, textarea { font: inherit; color: inherit; }
   'use strict';
 
   const CONFIG = {
-    APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbwUZwUwEvaYWiZuJr4X2UKA9OeW0ncGvXEkFZa1Zb_RFbOgp2iBUqfV1D63rc6c7MZUjg/exec',
+    API_URL: 'https://api-zepnkfm5la-de.a.run.app',
     GOOGLE_CLIENT_ID: '459536923115-0shnjk9m762klapudh6fhk1ph6pks8db.apps.googleusercontent.com',
     ALLOWED_HD: 'mail2.chshs.ntpc.edu.tw'
   };
@@ -755,7 +755,7 @@ button, input, textarea { font: inherit; color: inherit; }
     const localMine = local && (local.owner || '') === AUTH.email ? local : null;
     setSaveStatus('讀取雲端進度中…');
     try {
-      const cloud = await call('apiLoadProgress');
+      const cloud = await callRetry('apiLoadProgress');
       if (cloud && (!localMine || cloud.savedAt >= localMine.savedAt)) {
         applyState(cloud.state); S.savedAt = cloud.savedAt; writeLocal();
         setSaveStatus('已載入雲端進度');
@@ -790,7 +790,7 @@ button, input, textarea { font: inherit; color: inherit; }
   const tapeOf = { question: 'y', viewpoint: 'p', reasoning: 'p', evidence: 'b', format: 'g' };
 
   function call(fn, arg) {
-    return fetch(CONFIG.APPS_SCRIPT_URL, {
+    return fetch(CONFIG.API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({ fn, payload: arg, idToken: AUTH.idToken || '' })
@@ -798,6 +798,19 @@ button, input, textarea { font: inherit; color: inherit; }
       .then(res => res.json())
       .then(r => (r && r.ok) ? r.data : Promise.reject(new Error(r ? r.error : '伺服器沒有回應')))
       .catch(err => { throw err instanceof Error ? err : new Error(String(err)); });
+  }
+
+  /** 載入頁面、讀取進度這類「重複也無害」的請求：全班同時打開網頁可能暫時撞到 Apps Script 的同時執行上限，
+      失敗就隨機等一下再試（隨機是為了避免全班又在同一秒重試、再撞一次） */
+  async function callRetry(fn, arg, tries) {
+    tries = tries || 3;
+    for (let i = 1; ; i++) {
+      try { return await call(fn, arg); }
+      catch (err) {
+        if (i >= tries) throw err;
+        await new Promise(res => setTimeout(res, 1500 * i + Math.random() * 1500));
+      }
+    }
   }
 
   function busy(btn, label) {
@@ -879,6 +892,7 @@ button, input, textarea { font: inherit; color: inherit; }
 
   /* ── 進度儲存：登入者存雲端＋本機快取；未登入只存本機 7 天 ── */
   let cloudTimer = null;
+  let cloudDirty = false;
 
   function snapshot() {
     return {
@@ -911,18 +925,31 @@ button, input, textarea { font: inherit; color: inherit; }
     writeLocal();
     if (S.user.signedIn) {
       setSaveStatus('儲存中…');
+      cloudDirty = true;
       clearTimeout(cloudTimer);
-      cloudTimer = setTimeout(pushCloud, 1500);
+      // 停手 8 秒才存雲端（原本 1.5 秒）：全班同時打字時，存檔請求會少很多、不會擠在一起；
+      // 本機暫存每次都會即時寫，另外離開頁面／切到別的分頁時會立刻補存，不會因此掉資料
+      cloudTimer = setTimeout(pushCloud, 8000);
     } else {
       setSaveStatus('已暫存在這台裝置，7 天後自動清除');
     }
   }
+  function flushCloud() {
+    if (cloudDirty && S.user.signedIn) { clearTimeout(cloudTimer); pushCloud(); }
+  }
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flushCloud(); });
+  window.addEventListener('pagehide', flushCloud);
+
   async function pushCloud() {
+    cloudDirty = false;
     try {
       const r = await call('apiSaveProgress', snapshot());
       setSaveStatus('已存到雲端 ' + new Date(r.savedAt).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' }));
     } catch (err) {
-      setSaveStatus('雲端儲存失敗，已先存在這台裝置');
+      setSaveStatus('雲端儲存失敗，已先存在這台裝置，稍後會再試');
+      cloudDirty = true;
+      clearTimeout(cloudTimer);
+      cloudTimer = setTimeout(pushCloud, 15000);
     }
   }
   function applyState(st) {
@@ -1621,7 +1648,7 @@ button, input, textarea { font: inherit; color: inherit; }
     const local = readLocal();
 
     try {
-      const st = await call('apiGetAppState');
+      const st = await callRetry('apiGetAppState');
       S.rubric = st.rubric; S.chapters = st.chapters; Object.assign(S.config, st.config);
       S.coaches = st.coaches || [];
       if (!S.coach || !S.coaches.some(c => c.id === S.coach)) S.coach = (S.coaches[0] || {}).id || '';
